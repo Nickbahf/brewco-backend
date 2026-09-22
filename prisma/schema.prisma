@@ -1,0 +1,209 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  ADMIN
+  EMPLOYEE
+}
+
+enum AttendanceAction {
+  TIME_IN
+  TIME_OUT
+}
+
+enum RequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum RequestCategory {
+  TIME_CORRECTION
+  OVERTIME
+  SHIFT_SWAP
+}
+
+enum PaymentType {
+  CASH
+  CARD
+  E_WALLET
+}
+
+model Branch {
+  id        String   @id @default(cuid())
+  name      String
+  address   String?
+  createdAt DateTime @default(now())
+  users     User[]
+  shifts    Shift[]
+}
+
+model Shift {
+  id        String  @id @default(cuid())
+  branchId  String
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  name      String
+  startTime String
+  endTime   String
+  users     User[]
+
+  @@unique([branchId, name])
+}
+
+model User {
+  id            String   @id @default(cuid())
+  employeeCode  String   @unique
+  email         String   @unique
+  passwordHash String
+  mustChangePassword Boolean @default(false)
+  name          String
+  role          Role
+  position      String?
+  branchId      String
+  branch        Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  shiftId       String?
+  shift         Shift?   @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  active        Boolean  @default(true)
+  hiredAt       DateTime @default(now())
+
+  attendance    AttendanceLog[]
+  leaves        LeaveRequest[]
+  requests      GeneralRequest[]
+  decidedLeaves LeaveRequest[]   @relation("LeaveDecisions")
+  orders        Order[]
+  auditActs     AuditLog[]       @relation("ActorLogs")
+}
+
+model AttendanceLog {
+  id         String            @id @default(cuid())
+  userId     String
+  user       User              @relation(fields: [userId], references: [id], onDelete: Restrict)
+  action     AttendanceAction
+  qrId       String            @unique
+  occurredAt DateTime          @default(now())
+
+  @@index([userId, occurredAt(sort: Desc)])
+}
+
+model LeaveType {
+  id       String         @id @default(cuid())
+  name     String         @unique
+  requests LeaveRequest[]
+}
+
+model LeaveRequest {
+  id          String        @id @default(cuid())
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  leaveTypeId String
+  leaveType   LeaveType     @relation(fields: [leaveTypeId], references: [id], onDelete: Restrict)
+  dateFrom    DateTime      @db.Date
+  dateTo      DateTime      @db.Date
+  reason      String
+  status      RequestStatus @default(PENDING)
+  decidedById String?
+  decidedBy   User?         @relation("LeaveDecisions", fields: [decidedById], references: [id], onDelete: SetNull)
+  decidedAt   DateTime?
+  filedAt     DateTime      @default(now())
+
+  @@index([userId, filedAt(sort: Desc)])
+  @@index([status])
+}
+
+model GeneralRequest {
+  id         String           @id @default(cuid())
+  userId     String
+  user       User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  category   RequestCategory
+  date       DateTime         @db.Date
+  reason     String
+  status     RequestStatus    @default(PENDING)
+  filedAt    DateTime         @default(now())
+  correction TimeCorrection?
+  overtime   OvertimeClaim?
+  swap       ShiftSwap?
+
+  @@index([userId, filedAt(sort: Desc)])
+}
+
+model TimeCorrection {
+  requestId       String          @id
+  request         GeneralRequest  @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  correctClockIn  String
+  correctClockOut String
+}
+
+model OvertimeClaim {
+  requestId String         @id
+  request   GeneralRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  hours     Decimal        @db.Decimal(4, 2)
+}
+
+model ShiftSwap {
+  requestId   String         @id
+  request     GeneralRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  swapWithId  String
+  desiredDate DateTime       @db.Date
+}
+
+model ProductCategory {
+  id       String    @id @default(cuid())
+  name     String    @unique
+  products Product[]
+}
+
+model Product {
+  id         String          @id @default(cuid())
+  categoryId String
+  category   ProductCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  name       String
+  price      Decimal         @db.Decimal(10, 2)
+  stock      Int             @default(0)
+  active     Boolean         @default(true)
+  items      OrderItem[]
+
+  @@unique([categoryId, name])
+}
+
+model Order {
+  id          String      @id @default(cuid())
+  cashierId   String
+  cashier     User        @relation(fields: [cashierId], references: [id], onDelete: Restrict)
+  paymentType PaymentType
+  total       Decimal     @db.Decimal(10, 2)
+  createdAt   DateTime    @default(now())
+  items       OrderItem[]
+
+  @@index([cashierId, createdAt(sort: Desc)])
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  quantity  Int
+  unitPrice Decimal @db.Decimal(10, 2)
+
+  @@unique([orderId, productId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String
+  actor     User     @relation("ActorLogs", fields: [actorId], references: [id], onDelete: Restrict)
+  action    String
+  entity    String
+  entityId  String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt(sort: Desc)])
+}
