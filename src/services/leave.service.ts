@@ -32,9 +32,9 @@ export async function fileLeave(userId: string, raw: unknown) {
   });
 }
 
-export async function listLeaves(userId: string, role: string, raw: unknown) {
+export async function listLeaves(userId: string, canViewAll: boolean, raw: unknown) {
   const { status, mine } = LeaveQuery.parse(raw);
-  const scopedToSelf = role !== "ADMIN" || mine;
+  const scopedToSelf = !canViewAll || mine;
   return prisma.leaveRequest.findMany({
     where: {
       ...(scopedToSelf ? { userId } : {}),

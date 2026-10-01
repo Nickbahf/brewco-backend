@@ -2,24 +2,33 @@ import argon2 from "argon2";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { signToken } from "../middleware/auth";
+import { killSession, openSession, type SessionMeta } from "./session.service";
 
 export const LoginInput = z.object({
   email: z.string().trim().toLowerCase().email(),
   password: z.string().min(1),
 });
 
-export async function login(raw: unknown) {
+export async function login(raw: unknown, meta: SessionMeta = {}) {
   const { email, password } = LoginInput.parse(raw);
   const user = await prisma.user.findUnique({
     where: { email },
-    include: { branch: true, shift: true },
+    include: {
+      branch: true,
+      shift: true,
+      role: { include: { grants: { include: { permission: true } } } },
+    },
   });
   // Same-shape failure: never reveal whether the email exists.
-  if (!user || !user.active) throw new Error("Invalid email or password.");
+  if (!user || !user.active || user.archived) throw new Error("Invalid email or password.");
   const ok = await argon2.verify(user.passwordHash, password);
   if (!ok) throw new Error("Invalid email or password.");
 
-  const token = signToken(user.id, user.role);
+  const permissions = user.role.grants.map((g) => g.permission.key);
+  // Concurrent sessions: a new login opens a fresh session row; sessions
+  // on other devices are left untouched.
+  const session = await openSession(user.id, meta);
+  const token = signToken(user.id, session.id, user.role.name, permissions);
   return {
     token,
     user: {
@@ -27,13 +36,19 @@ export async function login(raw: unknown) {
       employeeCode: user.employeeCode,
       email: user.email,
       name: user.name,
-      role: user.role,
+      role: user.role.name,
+      permissions,
       position: user.position,
       branch: user.branch.name,
       shift: user.shift?.name ?? null,
       mustChangePassword: user.mustChangePassword,
     },
   };
+}
+
+export async function logout(sessionId: string) {
+  await killSession(sessionId);
+  return { ok: true };
 }
 
 export const ChangePasswordInput = z.object({
@@ -81,15 +96,20 @@ export async function completeSetup(userId: string, raw: unknown) {
 export async function me(userId: string) {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    include: { branch: true, shift: true },
+    include: {
+      branch: true,
+      shift: true,
+      role: { include: { grants: { include: { permission: true } } } },
+    },
   });
-  if (!user || !user.active) throw new Error("Account not found.");
+  if (!user || !user.active || user.archived) throw new Error("Account not found.");
   return {
     id: user.id,
     employeeCode: user.employeeCode,
     email: user.email,
     name: user.name,
-    role: user.role,
+    role: user.role.name,
+    permissions: user.role.grants.map((g) => g.permission.key),
     position: user.position,
     branch: user.branch.name,
     shift: user.shift ? { name: user.shift.name, start: user.shift.startTime, end: user.shift.endTime } : null,

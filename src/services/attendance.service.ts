@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { isUniqueViolation } from "../lib/http";
@@ -5,6 +6,10 @@ import { isUniqueViolation } from "../lib/http";
 export const ScanInput = z.object({
   // The QR carries ONLY the employee code (e.g. "EMP-0047").
   code: z.string().trim().min(1).max(32),
+  // Client-generated per scan attempt. Retries reuse it (safe); a new scan
+  // mints a new one. This is what makes double-submit safe, NOT the employee
+  // code — every scan must be allowed to log.
+  clientKey: z.string().trim().min(1).max(64).optional(),
 });
 
 function toPH(iso: Date): string {
@@ -39,7 +44,7 @@ export async function clockStatus(employeeCode: string) {
  * Idempotent: qrId UNIQUE means a re-scan of the same code logs once.
  */
 export async function scan(raw: unknown) {
-  const { code } = ScanInput.parse(raw);
+  const { code, clientKey } = ScanInput.parse(raw);
   const normalized = code.toUpperCase();
   const user = await prisma.user.findUnique({ where: { employeeCode: normalized } });
   if (!user || !user.active) throw new Error(`Unknown employee ID "${code}".`);
@@ -52,7 +57,7 @@ export async function scan(raw: unknown) {
 
   try {
     const row = await prisma.attendanceLog.create({
-      data: { userId: user.id, action, qrId: normalized },
+      data: { userId: user.id, action, qrId: clientKey ?? randomUUID() },
     });
     return {
       employeeCode: user.employeeCode,
@@ -82,13 +87,19 @@ export const AttendanceQuery = z.object({
   employeeCode: z.string().trim().min(1).max(32).optional(),
   from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(20),
+  limit: z.coerce.number().int().min(1).max(1000).default(20),
 });
 
-export async function listLogs(raw: unknown) {
+export async function listLogs(callerId: string, canViewAll: boolean, raw: unknown) {
   const { employeeCode, from, to, limit } = AttendanceQuery.parse(raw);
-  const user = employeeCode
-    ? await prisma.user.findUnique({ where: { employeeCode: employeeCode.toUpperCase() } })
+  let code = employeeCode;
+  if (!canViewAll) {
+    // Restricted callers can only ever see their own logs.
+    const self = await prisma.user.findUnique({ where: { id: callerId } });
+    code = self?.employeeCode;
+  }
+  const user = code
+    ? await prisma.user.findUnique({ where: { employeeCode: code.toUpperCase() } })
     : null;
   const rows = await prisma.attendanceLog.findMany({
     where: {
@@ -152,7 +163,7 @@ export async function manualEntry(adminId: string, raw: unknown) {
   });
 }
 
-/** Personal summary for the logged-in employee: status, today's first IN, week hours. */
+/** Personal summary for the logged-in employee: status, today's first IN, hours. */
 export async function mySummary(userId: string) {
   const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   const logs = await prisma.attendanceLog.findMany({
@@ -167,23 +178,52 @@ export async function mySummary(userId: string) {
   const today = phDay(new Date());
   const todayIn = logs.find((l) => l.action === "TIME_IN" && phDay(l.occurredAt) === today);
 
-  let weekMs = 0;
-  let openIn: Date | null = null;
-  for (const l of logs) {
-    if (l.action === "TIME_IN") {
-      openIn = l.occurredAt;
-    } else if (l.action === "TIME_OUT" && openIn) {
-      weekMs += l.occurredAt.getTime() - openIn.getTime();
-      openIn = null;
+  // Flexible schedule: no fixed shifts — everyone just banks hours toward the daily target.
+  const TARGET_HOURS = 8;
+  const pairMs = (list: { action: string; occurredAt: Date }[], includeOpen: boolean) => {
+    let ms = 0;
+    let open: Date | null = null;
+    for (const l of list) {
+      if (l.action === "TIME_IN") open = l.occurredAt;
+      else if (l.action === "TIME_OUT" && open) {
+        ms += l.occurredAt.getTime() - open.getTime();
+        open = null;
+      }
     }
-  }
-  const weekHours = Math.round((weekMs / 3600000) * 10) / 10;
+    if (includeOpen && open) ms += Date.now() - open.getTime();
+    return ms;
+  };
+  const todayLogs = logs.filter((l) => phDay(l.occurredAt) === today);
+  const todayMs = pairMs(todayLogs, true);
+  const weekMs = pairMs(logs, true);
+  const round1 = (ms: number) => Math.round((ms / 3600000) * 10) / 10;
 
   return {
     status,
     nextAction: status === "IN" ? "TIME_OUT" : "TIME_IN",
     todayFirstInPH: todayIn ? toPH(todayIn.occurredAt) : null,
-    weekHours,
+    todayHours: round1(todayMs),
+    targetHours: TARGET_HOURS,
+    weekHours: round1(weekMs),
     logsThisWeek: logs.length,
   };
+}
+
+/** Everyone currently clocked in (latest log is TIME_IN). No shift table needed. */
+export async function onDutyNow() {
+  const logs = await prisma.attendanceLog.findMany({
+    orderBy: { occurredAt: "desc" },
+    take: 200,
+    include: { user: { select: { employeeCode: true, name: true } } },
+  });
+  const seen = new Set<string>();
+  const out: { employeeCode: string; name: string; sincePH: string }[] = [];
+  for (const l of logs) {
+    if (seen.has(l.userId)) continue;
+    seen.add(l.userId);
+    if (l.action === "TIME_IN") {
+      out.push({ employeeCode: l.user.employeeCode, name: l.user.name, sincePH: toPH(l.occurredAt) });
+    }
+  }
+  return out;
 }

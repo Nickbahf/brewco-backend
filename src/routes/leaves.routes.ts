@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { ZodError } from "zod";
 import { zodError } from "../lib/http";
-import { requireAuth, requireRole, type AuthedRequest } from "../middleware/auth";
+import { requireAuth, requirePermission, hasPermission, type AuthedRequest } from "../middleware/auth";
 import { decideLeave, fileLeave, leaveTypes, listLeaves } from "../services/leave.service";
 
 export const leaveRoutes = Router();
@@ -15,7 +15,7 @@ leaveRoutes.get("/types", async (_req, res) => {
 leaveRoutes.get("/", async (req, res) => {
   const auth = (req as AuthedRequest).auth;
   try {
-    return res.json(await listLeaves(auth.sub, auth.role, req.query));
+    return res.json(await listLeaves(auth.sub, hasPermission(auth, "leaves.view"), req.query));
   } catch (e) {
     if (e instanceof ZodError) return zodError(res, e);
     throw e;
@@ -32,7 +32,7 @@ leaveRoutes.post("/", async (req, res) => {
   }
 });
 
-leaveRoutes.patch("/:id", requireRole("ADMIN"), async (req, res) => {
+leaveRoutes.patch("/:id", requirePermission("leaves.decide"), async (req, res) => {
   const auth = (req as AuthedRequest).auth;
   try {
     return res.json(await decideLeave(auth.sub, req.params.id, req.body));

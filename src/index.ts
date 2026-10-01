@@ -2,6 +2,8 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
 import { env } from "./lib/env";
+import { apiLimiter, enforceHttps, securityHeaders } from "./middleware/security";
+import { deobfuscate } from "./middleware/obfuscate";
 import { adminRoutes } from "./routes/admin.routes";
 import { attendanceRoutes } from "./routes/attendance.routes";
 import { authRoutes } from "./routes/auth.routes";
@@ -12,11 +14,17 @@ import { shopRoutes } from "./routes/shop.routes";
 dotenv.config();
 
 const app = express();
+// Behind Render's proxy: trust it so req.ip is the real client IP (matters for rate limits).
+app.set("trust proxy", 1);
+app.use(securityHeaders);
+app.use(enforceHttps);
 app.use(cors());
 app.use(express.json({ limit: "100kb" }));
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
+app.use("/api/", apiLimiter);
+app.use("/api/", deobfuscate);
 app.use("/api/auth", authRoutes);
 app.use("/api/attendance", attendanceRoutes);
 app.use("/api/leaves", leaveRoutes);

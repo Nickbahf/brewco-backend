@@ -1,8 +1,10 @@
 import { Router } from "express";
 import { ZodError } from "zod";
 import { zodError } from "../lib/http";
-import { requireAuth, requireRole, type AuthedRequest } from "../middleware/auth";
-import { clockStatus, listLogs, manualEntry, mySummary, scan } from "../services/attendance.service";
+import { requireAuth, type AuthedRequest } from "../middleware/auth";
+import { requirePermission, hasPermission } from "../middleware/auth";
+import { writeLimiter } from "../middleware/security";
+import { clockStatus, listLogs, manualEntry, mySummary, onDutyNow, scan } from "../services/attendance.service";
 
 export const attendanceRoutes = Router();
 
@@ -20,7 +22,7 @@ attendanceRoutes.get("/status", async (req, res) => {
 });
 
 // Scanning writes rows → admin only (employee QR is scanned BY admin).
-attendanceRoutes.post("/scan", requireRole("ADMIN"), async (req, res) => {
+attendanceRoutes.post("/scan", requirePermission("attendance.scan"), writeLimiter, async (req, res) => {
   try {
     return res.status(201).json(await scan(req.body));
   } catch (e) {
@@ -30,8 +32,9 @@ attendanceRoutes.post("/scan", requireRole("ADMIN"), async (req, res) => {
 });
 
 attendanceRoutes.get("/logs", async (req, res) => {
+  const auth = (req as AuthedRequest).auth;
   try {
-    return res.json(await listLogs(req.query));
+    return res.json(await listLogs(auth.sub, hasPermission(auth, "attendance.view"), req.query));
   } catch (e) {
     if (e instanceof ZodError) return zodError(res, e);
     throw e;
@@ -43,7 +46,11 @@ attendanceRoutes.get("/me/summary", async (req, res) => {
   return res.json(await mySummary(auth.sub));
 });
 
-attendanceRoutes.post("/manual", requireRole("ADMIN"), async (req, res) => {
+attendanceRoutes.get("/on-duty", requirePermission("attendance.view"), async (_req, res) => {
+  return res.json(await onDutyNow());
+});
+
+attendanceRoutes.post("/manual", requirePermission("attendance.manual"), writeLimiter, async (req, res) => {
   const auth = (req as AuthedRequest).auth;
   try {
     return res.status(201).json(await manualEntry(auth.sub, req.body));

@@ -1,4 +1,4 @@
-import { PrismaClient, Role } from "@prisma/client";
+import { PrismaClient } from "@prisma/client";
 import argon2 from "argon2";
 
 const prisma = new PrismaClient();
@@ -31,8 +31,8 @@ const PRODUCTS: { category: (typeof CATEGORIES)[number]; name: string; price: st
 async function main() {
   const branch = await prisma.branch.upsert({
     where: { id: "seed-branch-makati" },
-    update: {},
-    create: { id: "seed-branch-makati", name: "Brew & Co. Makati", address: "Makati, Metro Manila" },
+    update: { name: "Elunari Makati" },
+    create: { id: "seed-branch-makati", name: "Elunari Makati", address: "Makati, Metro Manila" },
   });
 
   for (const name of ["Morning", "Afternoon", "Evening"]) {
@@ -65,7 +65,7 @@ async function main() {
     });
   }
 
-  const users: { code: string; email: string; pass: string; name: string; role: Role; position: string }[] = [
+  const users: { code: string; email: string; pass: string; name: string; role: string; position: string }[] = [
     { code: "ADM-0012", email: "admin@email.com", pass: "admin123", name: "Maria Santos", role: "ADMIN", position: "Branch Admin" },
     { code: "EMP-0047", email: "rica@brewco.com", pass: "employee123", name: "Rica Bautista", role: "EMPLOYEE", position: "Senior Barista" },
     { code: "EMP-0051", email: "jun@brewco.com", pass: "employee123", name: "Jun Dela Cruz", role: "EMPLOYEE", position: "Cashier" },
@@ -74,6 +74,7 @@ async function main() {
     { code: "EMP-0061", email: "cath@brewco.com", pass: "employee123", name: "Cath Manalo", role: "EMPLOYEE", position: "Receptionist" },
   ];
   for (const u of users) {
+    const roleRow = await prisma.role.findUniqueOrThrow({ where: { name: u.role } });
     await prisma.user.upsert({
       where: { email: u.email },
       update: {},
@@ -82,12 +83,61 @@ async function main() {
         email: u.email,
         passwordHash: await argon2.hash(u.pass, { type: argon2.argon2id }),
         name: u.name,
-        role: u.role,
+        roleId: roleRow.id,
         position: u.position,
         branchId: branch.id,
         shiftId: morning.id,
       },
     });
+  }
+
+  // ---- Default permission grants (adaptive access control) ----
+  const EMPLOYEE_KEYS = [
+    "attendance.me",
+    "products.view",
+    "orders.create",
+    "leaves.file",
+    "requests.file",
+  ];
+  const MANAGER_KEYS = [
+    ...EMPLOYEE_KEYS,
+    "attendance.scan",
+    "attendance.manual",
+    "attendance.view",
+    "products.create",
+    "products.update",
+    "reports.view",
+    "leaves.view",
+    "leaves.decide",
+    "users.view",
+  ];
+  const ALL_KEYS = [
+    ...MANAGER_KEYS,
+    "products.delete",
+    "users.create",
+    "users.password",
+    "users.status",
+    "users.archive",
+    "audit.view",
+  ];
+  for (const key of ALL_KEYS) {
+    await prisma.permission.upsert({ where: { key }, update: {}, create: { key } });
+  }
+  const grants: Record<string, string[]> = {
+    ADMIN: ALL_KEYS,
+    MANAGER: MANAGER_KEYS,
+    EMPLOYEE: EMPLOYEE_KEYS,
+  };
+  for (const [roleName, keys] of Object.entries(grants)) {
+    const roleRow = await prisma.role.findUniqueOrThrow({ where: { name: roleName } });
+    for (const key of keys) {
+      const perm = await prisma.permission.findUniqueOrThrow({ where: { key } });
+      await prisma.rolePermission.upsert({
+        where: { roleId_permissionId: { roleId: roleRow.id, permissionId: perm.id } },
+        update: {},
+        create: { roleId: roleRow.id, permissionId: perm.id },
+      });
+    }
   }
 
   console.log("Seed complete.");

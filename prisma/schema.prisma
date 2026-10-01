@@ -8,11 +8,6 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
-enum Role {
-  ADMIN
-  EMPLOYEE
-}
-
 enum AttendanceAction {
   TIME_IN
   TIME_OUT
@@ -64,13 +59,15 @@ model User {
   passwordHash String
   mustChangePassword Boolean @default(false)
   name          String
-  role          Role
+  roleId        String
+  role          Role     @relation(fields: [roleId], references: [id], onDelete: Restrict)
   position      String?
   branchId      String
   branch        Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
   shiftId       String?
   shift         Shift?   @relation(fields: [shiftId], references: [id], onDelete: SetNull)
   active        Boolean  @default(true)
+  archived      Boolean  @default(false)
   hiredAt       DateTime @default(now())
 
   attendance    AttendanceLog[]
@@ -79,6 +76,7 @@ model User {
   decidedLeaves LeaveRequest[]   @relation("LeaveDecisions")
   orders        Order[]
   auditActs     AuditLog[]       @relation("ActorLogs")
+  sessions      UserSession[]
 }
 
 model AttendanceLog {
@@ -166,6 +164,7 @@ model Product {
   name       String
   price      Decimal         @db.Decimal(10, 2)
   stock      Int             @default(0)
+  imageUrl   String?
   active     Boolean         @default(true)
   items      OrderItem[]
 
@@ -206,4 +205,46 @@ model AuditLog {
   createdAt DateTime @default(now())
 
   @@index([createdAt(sort: Desc)])
+}
+
+// ---- Multiple concurrent sessions per user, 1h idle timeout ----
+model UserSession {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ip             String?
+  userAgent      String?
+  deviceId       String?
+  createdAt      DateTime @default(now())
+  lastSeenAt     DateTime @default(now())
+  expiresAt      DateTime
+  tokenExpiresAt DateTime
+  isActive       Boolean  @default(true)
+
+  @@index([userId, isActive])
+}
+
+// ---- RBAC: roles, permissions, grants (adaptive access control) ----
+model Role {
+  id          String           @id @default(cuid())
+  name        String           @unique // ADMIN, MANAGER, EMPLOYEE (seeded)
+  description String?
+  users       User[]
+  grants      RolePermission[]
+}
+
+model Permission {
+  id          String           @id @default(cuid())
+  key         String           @unique // e.g. attendance.scan
+  description String?
+  grants      RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
 }

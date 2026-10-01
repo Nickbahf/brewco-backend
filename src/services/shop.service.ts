@@ -1,12 +1,25 @@
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 
+const httpUrl = z
+  .string()
+  .trim()
+  .max(500)
+  .optional()
+  .refine((v) => !v || /^https?:\/\/.+\..+/.test(v), "Image must be an http(s) URL.");
+
 export const ProductInput = z.object({
   categoryId: z.string().cuid(),
   name: z.string().trim().min(1).max(120),
   price: z.number().positive().max(1000000),
   stock: z.number().int().min(0),
+  imageUrl: httpUrl,
 });
+
+function clean<T extends { imageUrl?: string }>(input: T): Omit<T, "imageUrl"> & { imageUrl?: string | null } {
+  const { imageUrl, ...rest } = input;
+  return { ...rest, ...(imageUrl ? { imageUrl } : {}) };
+}
 
 export async function listProducts() {
   return prisma.product.findMany({
@@ -17,7 +30,7 @@ export async function listProducts() {
 }
 
 export async function createProduct(adminId: string, raw: unknown) {
-  const input = ProductInput.parse(raw);
+  const input = clean(ProductInput.parse(raw));
   return prisma.$transaction(async (tx) => {
     const row = await tx.product.create({ data: input });
     await tx.auditLog.create({
@@ -28,7 +41,7 @@ export async function createProduct(adminId: string, raw: unknown) {
 }
 
 export async function updateProduct(adminId: string, id: string, raw: unknown) {
-  const input = ProductInput.partial().parse(raw);
+  const input = clean(ProductInput.partial().parse(raw));
   return prisma.$transaction(async (tx) => {
     const row = await tx.product.update({ where: { id }, data: input });
     await tx.auditLog.create({
@@ -52,22 +65,23 @@ export async function categories() {
   return prisma.productCategory.findMany({ orderBy: { name: "asc" } });
 }
 
-/** Daily revenue buckets for the last N days (computed in JS — no raw SQL). */
+/** Daily revenue buckets on Philippine calendar days (computed in JS — no raw SQL). */
 export async function dailyRevenue(raw: unknown) {
-  const { days } = z.object({ days: z.coerce.number().int().min(1).max(31).default(7) }).parse(raw);
-  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const { days } = z.object({ days: z.coerce.number().int().min(1).max(62).default(7) }).parse(raw);
+  const since = new Date(Date.now() - (days + 1) * 24 * 60 * 60 * 1000);
   const orders = await prisma.order.findMany({
     where: { createdAt: { gte: since } },
     select: { total: true, createdAt: true },
   });
+  const phDay = (d: Date) =>
+    new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
   const buckets = new Map<string, { total: number; orders: number }>();
   for (let i = days - 1; i >= 0; i--) {
     const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
-    buckets.set(d.toISOString().slice(0, 10), { total: 0, orders: 0 });
+    buckets.set(phDay(d), { total: 0, orders: 0 });
   }
   for (const o of orders) {
-    const key = o.createdAt.toISOString().slice(0, 10);
-    const b = buckets.get(key);
+    const b = buckets.get(phDay(o.createdAt));
     if (b) {
       b.total += Number(o.total);
       b.orders += 1;
